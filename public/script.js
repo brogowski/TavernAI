@@ -967,6 +967,96 @@ $(document).ready(function(){
             if(type == 'swipe'){
                 chat2.shift();
             }
+
+            const maxSummaryTokenSize = gap_holder;
+            const contextSize = this_max_context;
+            const calculateTokenSize = (x) => encode(JSON.stringify(x)).length;
+            const getMessageCountToSummarize = (messages) => {
+                for (var countOfMessagesToSummarize = 1; countOfMessagesToSummarize++; countOfMessagesToSummarize < messages.length+1){
+                    const textToSummarize = messages.slice().reverse().slice(0, countOfMessagesToSummarize).reduce((a, b) => a + b);
+                    
+                    var tokenSizeGained = calculateTokenSize(textToSummarize)-maxSummaryTokenSize;
+                    if (whileChat2PromptTokenSize-tokenSizeGained < contextSize){
+                        return countOfMessagesToSummarize;
+                    }
+                }
+                //TODO: more aggresive gain (aim for 50% reduction)
+                //TODO: handle edge case where summary of all messages is still to big for context  
+                //TODO: add summary size checks against maximum input prompt size                               
+            };
+            const generateSummary = (previousSummary, messages) => {
+                return new Promise((resolve, reject) => {
+                    const data = {
+                        "model": model_openai,
+                        "temperature": parseFloat(temp_openai),
+                        "frequency_penalty": parseFloat(freq_pen_openai),
+                        "presence_penalty": parseFloat(pres_pen_openai),
+                        "top_p": parseFloat(top_p_openai),
+                        "stop": [ name1+':', '<|endoftext|>'],
+                        "max_tokens": parseInt(amount_gen_openai),
+                        "messages": [
+                            {role: "system", content: "You are a text summarization assistant. You respond only with summary that the user requests - nothing more, nothing less."},
+                            {role: "user", content: `Here's what has recently happened:\n\n---\n${messages.join("\n\n")}\n---\n\nHere's a summary of what happened previously:\n\n---\n${previousSummary}\n---\n\nPlease reply with a new version of this summary that ALSO includes what has recently happened. Include ALL the KEY details. DO NOT MISS ANY IMPORTANT DETAILS. You MUST include all the details that were in the previous summary in your response. Your response should start with "${previousSummary.split(" ").slice(0, 5).join(" ")}" and it should compress all the important details into a summary.`},
+                          ]
+                    };
+                    jQuery.ajax({    
+                        type: 'POST',
+                        url: '/generate_openai',
+                        data: JSON.stringify(data),
+                        cache: false,
+                        dataType: "json",
+                        contentType: "application/json",
+                        success: function(data){
+                            if(data.error != true){
+                                var getMessage = '';
+                                if(model_openai === 'gpt-3.5-turbo' || model_openai === 'gpt-3.5-turbo-0301'){
+                                    getMessage = data.choices[0].message.content;
+                                }else{
+                                    getMessage = data.choices[0].text;
+                                }
+                                resolve(getMessage);
+                            } else {
+                                console.log(data.error);
+                                reject(data.error);
+                            }
+                        },
+                        error: function (jqXHR, exception) {
+                            console.log(exception);
+                            console.log(jqXHR);
+                            reject(exception);
+                        }
+                    });    
+                });            
+            };
+
+            const allChat2Messages = chat2.reduce((a,b) => a+b);
+            const wholeChat2Prompt = storyString+mesExmString+allChat2Messages+anchorTop+anchorBottom+charPersonality;
+            const whileChat2PromptTokenSize = calculateTokenSize(wholeChat2Prompt)+gap_holder;
+
+            if (whileChat2PromptTokenSize >= contextSize){                
+                const chat2MessagesFromOldestToNewest = chat2.slice().reverse();
+                const welcomeMessage = chat2MessagesFromOldestToNewest[0];
+
+                const countOfMessagesToSummarize = getMessageCountToSummarize(chat2MessagesFromOldestToNewest);
+                var messagesToSummarize = chat2MessagesFromOldestToNewest.slice(0, countOfMessagesToSummarize);
+                var summary = await generateSummary(welcomeMessage, messagesToSummarize);
+                
+                chat2 = chat2.slice(0, -countOfMessagesToSummarize);
+                chat2.push(summary)
+
+                chat = chat.slice(countOfMessagesToSummarize);
+                chat.unshift({
+                    name: name2,
+                    is_user: false,
+                    is_name: true,
+                    send_date: Date.now(),
+                    mes: summary
+                });
+                $('#chat').empty()
+                getChatResult();
+                //TODO: handle edge case where summary messages exceeds GPT context size (ex: when importing old long chat)
+            }
+
             for (var item of chat2) {//console.log(encode("dsfs").length);
                 chatString = item+chatString;
                 if(encode(JSON.stringify(storyString+mesExmString+chatString+anchorTop+anchorBottom+charPersonality)).length+gap_holder < this_max_context){ //(The number of tokens in the entire prompt) need fix, it must count correctly (added +120, so that the description of the character does not hide)
